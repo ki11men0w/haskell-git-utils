@@ -37,6 +37,7 @@ import Data.Attoparsec.ByteString.Char8
 import Data.Time.Clock.POSIX
 import Data.Time.Clock
 
+import Data.ByteString.UTF8 (toString)
 
 type Text = ByteString
 
@@ -51,6 +52,7 @@ type RefName = Text
 type GitHash = Text
 type UserName = Text
 type UserEmail = Text
+type MessageText = String
 
 
 data GitReference = GitRef Text (Maybe GitReference) | GitTag RefName | GitBranch RefName | GitRemoteBranch RepoName RefName
@@ -66,7 +68,7 @@ data GitCommit = GitCommit {
   , parents :: [GitHash]
   , author :: OwnershipInfo
   , committer :: OwnershipInfo
-  , message :: Maybe Text
+  , message :: Maybe MessageText
   , refs :: [GitReference]
   } deriving (Show)
 
@@ -220,7 +222,7 @@ parseCommit = do
               , parents = getParents logFields
               , author = getAuthor logFields
               , committer = getCommitter logFields
-              , message = message
+              , message = toString <$> message
               , refs = refs
               }
   where
