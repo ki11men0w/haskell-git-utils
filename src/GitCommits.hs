@@ -31,9 +31,11 @@ import Data.Map (Map(..), fromList, elems, keys, lookup)
 import Control.Applicative (many, (<|>))
 import Data.Attoparsec.Combinator
 
-import Data.ByteString.Char8 as T hiding (map, count)
+import Data.ByteString.Char8 as T hiding (map, count, head)
 import Data.Attoparsec.ByteString.Char8
 
+import Data.Time.Clock.POSIX
+import Data.Time.Clock
 
 
 type Text = ByteString
@@ -47,14 +49,22 @@ instance Show GitVersion where
 type RepoName = Text
 type RefName = Text
 type GitHash = Text
+type UserName = Text
+type UserEmail = Text
+
 
 data GitReference = GitRef Text (Maybe GitReference) | GitTag RefName | GitBranch RefName | GitRemoteBranch RepoName RefName
                   deriving (Show)
+
+data OwnershipInfo = OwnershipInfo {userName :: UserName, userEmail :: UserEmail, utcTime :: UTCTime}
+  deriving (Show)
 
 data GitCommit = GitCommit {
     hash :: GitHash
   , childrens :: [GitHash]
   , parents :: [GitHash]
+  , author :: OwnershipInfo
+  , committer :: OwnershipInfo
   , message :: Maybe Text
   , refs :: [GitReference]
   } deriving (Show)
@@ -62,7 +72,11 @@ data GitCommit = GitCommit {
 
 type GitCommitsMap = Map GitHash GitCommit
 
-data LogField = LogFieldParent GitHash | LogFieldUnused
+data LogField = LogFieldParent GitHash
+              | LogFieldAuthor OwnershipInfo
+              | LogFieldCommitter OwnershipInfo
+              | LogFieldUnused
+                deriving (Show)
 
 
 gitError = error "Error running git process"
@@ -139,12 +153,40 @@ parseReferences = do
 parseParent :: Parser LogField
 parseParent = string "parent " *> (LogFieldParent <$> parseGitCommitHash) <* endOfLine
 
+skipRestOfLine :: Parser ()
+skipRestOfLine =
+  takeWhile1 (notInClass "\n\r") *> endOfLine *> pure ()
+
+parseOwnershipInfo :: Parser OwnershipInfo
+parseOwnershipInfo = do
+  name <- manyTill anyChar (lookAhead $ string " <")
+  char ' '
+  email <- char '<' *> many1 (notChar '>') <* char '>'
+  char ' '
+  posixTime <- many1 digit
+  skipRestOfLine
+  return OwnershipInfo {
+                     userName = pack name
+                   , userEmail = pack email
+                   , utcTime = (posixSecondsToUTCTime . realToFrac . read) posixTime
+                   }
+
+parseAuthor :: Parser LogField
+parseAuthor = do
+  string "author "
+  LogFieldAuthor <$> parseOwnershipInfo
+
+parseCommitter :: Parser LogField
+parseCommitter = do
+  string "committer "
+  LogFieldCommitter <$> parseOwnershipInfo
+
 skipField :: Text -> Parser LogField
-skipField field = string field *> char ' ' *> takeWhile1 (notInClass "\n\r") *> endOfLine *> pure LogFieldUnused
+skipField field = string field *> char ' ' *> skipRestOfLine *> pure LogFieldUnused
 
 parseLogFields :: Parser [LogField]
 parseLogFields =
-  many $ choice $ parseParent : map skipField ["tree", "author", "committer"]
+  many $ choice $ [parseParent, parseAuthor, parseCommitter] ++ map skipField ["tree"]
 
 
 commitStart :: Parser ()
@@ -169,7 +211,15 @@ parseCommit = do
   endOfLine
   logFields <- parseLogFields
   message <- parseMessage
-  return GitCommit {hash = hash, childrens = childrens, parents = getParents logFields, message = message, refs = refs}
+  return GitCommit {
+                hash = hash
+              , childrens = childrens
+              , parents = getParents logFields
+              , author = getAuthor logFields
+              , committer = getCommitter logFields
+              , message = message
+              , refs = refs
+              }
   where
     getParents :: [LogField] -> [GitHash]
     getParents =
@@ -179,6 +229,22 @@ parseCommit = do
         getParentHash (LogFieldParent x) = Just x
         getParentHash _ = Nothing
     
+    getAuthor :: [LogField] -> OwnershipInfo
+    getAuthor =
+      head . mapMaybe getAuthor'
+      where
+        getAuthor' :: LogField -> Maybe OwnershipInfo
+        getAuthor' (LogFieldAuthor x) = Just x
+        getAuthor' _ = Nothing
+
+    getCommitter :: [LogField] -> OwnershipInfo
+    getCommitter =
+      head . mapMaybe getCommitter'
+      where
+        getCommitter' :: LogField -> Maybe OwnershipInfo
+        getCommitter' (LogFieldCommitter x) = Just x
+        getCommitter' _ = Nothing
+
 
 -- | Возвращает все комиты репозитория расположенного
 -- в текущем каталоге в виде списка.
