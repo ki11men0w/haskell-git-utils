@@ -61,6 +61,7 @@ data OwnershipInfo = OwnershipInfo {userName :: UserName, userEmail :: UserEmail
 
 data GitCommit = GitCommit {
     hash :: GitHash
+  , tree :: GitHash
   , childrens :: [GitHash]
   , parents :: [GitHash]
   , author :: OwnershipInfo
@@ -73,6 +74,7 @@ data GitCommit = GitCommit {
 type GitCommitsMap = Map GitHash GitCommit
 
 data LogField = LogFieldParent GitHash
+              | LogFieldTree GitHash
               | LogFieldAuthor OwnershipInfo
               | LogFieldCommitter OwnershipInfo
               | LogFieldUnused
@@ -153,6 +155,9 @@ parseReferences = do
 parseParent :: Parser LogField
 parseParent = string "parent " *> (LogFieldParent <$> parseGitCommitHash) <* endOfLine
 
+parseTree :: Parser LogField
+parseTree = string "tree " *> (LogFieldTree <$> parseGitCommitHash) <* endOfLine
+
 skipRestOfLine :: Parser ()
 skipRestOfLine =
   takeWhile1 (notInClass "\n\r") *> endOfLine *> pure ()
@@ -181,12 +186,9 @@ parseCommitter = do
   string "committer "
   LogFieldCommitter <$> parseOwnershipInfo
 
-skipField :: Text -> Parser LogField
-skipField field = string field *> char ' ' *> skipRestOfLine *> pure LogFieldUnused
-
 parseLogFields :: Parser [LogField]
 parseLogFields =
-  many $ choice $ [parseParent, parseAuthor, parseCommitter] ++ map skipField ["tree"]
+  many $ choice [parseParent, parseAuthor, parseCommitter, parseTree]
 
 
 commitStart :: Parser ()
@@ -213,6 +215,7 @@ parseCommit = do
   message <- parseMessage
   return GitCommit {
                 hash = hash
+              , tree = getTree logFields
               , childrens = childrens
               , parents = getParents logFields
               , author = getAuthor logFields
@@ -229,6 +232,14 @@ parseCommit = do
         getParentHash (LogFieldParent x) = Just x
         getParentHash _ = Nothing
     
+    getTree :: [LogField] -> GitHash
+    getTree =
+      head . mapMaybe getTree'
+      where
+        getTree' :: LogField -> Maybe GitHash
+        getTree' (LogFieldTree x) = Just x
+        getTree' _ = Nothing
+
     getAuthor :: [LogField] -> OwnershipInfo
     getAuthor =
       head . mapMaybe getAuthor'
