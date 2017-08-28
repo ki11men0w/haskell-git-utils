@@ -1,7 +1,7 @@
 {-  -*- coding:utf-8 -*-  -}
 {-# LANGUAGE OverloadedStrings #-}
 module GitCommits
-    ( Text
+    ( Textual
     , RepoName
     , RefName
     , GitHash
@@ -31,15 +31,19 @@ import Data.Map (Map(..), fromList, elems, keys, lookup)
 import Control.Applicative (many, (<|>))
 import Data.Attoparsec.Combinator
 
-import Data.ByteString.Char8 as T hiding (map, count, head)
+import qualified Data.ByteString.Char8 as C8
 import Data.Attoparsec.ByteString.Char8
+
+import Data.Text as T hiding (count, head)
+import Data.Text.Encoding (decodeUtf8With)
+import Data.Text.Encoding.Error (lenientDecode)
+
 
 import Data.Time.Clock.POSIX
 import Data.Time.Clock
 
-import Data.ByteString.UTF8 (toString)
-
-type Text = ByteString
+type InputData = C8.ByteString
+type Textual = Text
 
 data GitVersion = GitVersion {major :: Int, minor :: Int} deriving (Eq, Ord)
 
@@ -47,15 +51,15 @@ instance Show GitVersion where
   show v = show (major v) <> "." <> show (minor v)
 
 
-type RepoName = Text
-type RefName = Text
-type GitHash = Text
-type UserName = Text
-type UserEmail = Text
-type MessageText = String
+type RepoName = Textual
+type RefName = Textual
+type GitHash = Textual
+type UserName = Textual
+type UserEmail = Textual
+type MessageText = Textual
 
 
-data GitReference = GitRef Text (Maybe GitReference) | GitTag RefName | GitBranch RefName | GitRemoteBranch RepoName RefName
+data GitReference = GitRef Textual (Maybe GitReference) | GitTag RefName | GitBranch RefName | GitRemoteBranch RepoName RefName
                   deriving (Show)
 
 data OwnershipInfo = OwnershipInfo {userName :: UserName, userEmail :: UserEmail, utcTime :: UTCTime}
@@ -91,6 +95,9 @@ correctParseResult errorMsg parseResult =
     Left orig -> Left $ errorMsg <> ":\n" <> orig
     _ -> parseResult
 
+decode :: InputData -> Textual
+decode = decodeUtf8With lenientDecode
+
 parseVersion :: Parser GitVersion
 parseVersion = do
   string "git version "
@@ -106,11 +113,11 @@ getGitVersion =
     case exitCode of
       ExitFailure _ -> gitError
       ExitSuccess -> do
-        rawVersionInput <- hGetContents outh
+        rawVersionInput <- C8.hGetContents outh
         return $ correctParseResult "Can not realize GIT version" $ parseOnly parseVersion rawVersionInput
 
-parseToken :: Parser Text
-parseToken = takeWhile1 (\c -> notInClass "),\n\r" c && (not . isSpace) c)
+parseToken :: Parser Textual
+parseToken = decode <$> takeWhile1 (\c -> notInClass "),\n\r" c && (not . isSpace) c)
 
 parseGitCommitHash :: Parser GitHash
 parseGitCommitHash = pack <$> count 40 (satisfy (inClass "0-9a-f"))
@@ -196,15 +203,15 @@ parseLogFields =
 commitStart :: Parser ()
 commitStart = void $ string "commit "
 
-parseMessage :: Parser (Maybe Text)
+parseMessage :: Parser (Maybe Textual)
 parseMessage =
-  option Nothing $ endOfLine *> (Just . T.intercalate "\n" <$> oneLine `sepBy` endOfLine) <* endOfLine
+  option Nothing $ endOfLine *> (Just . decode . C8.intercalate "\n" <$> oneLine `sepBy` endOfLine) <* endOfLine
   where
     padding = string "    " *> return ()
 
     anyMessageEndsWithIt = endOfLine *> (endOfInput <|> padding <|> (endOfLine *> commitStart))
-    oneLine :: Parser Text
-    oneLine = padding *> (pack <$> manyTill anyChar (lookAhead anyMessageEndsWithIt))
+    oneLine :: Parser InputData
+    oneLine = padding *> (C8.pack <$> manyTill anyChar (lookAhead anyMessageEndsWithIt))
 
 parseCommit :: Parser GitCommit
 parseCommit = do
@@ -222,7 +229,7 @@ parseCommit = do
               , parents = getParents logFields
               , author = getAuthor logFields
               , committer = getCommitter logFields
-              , message = toString <$> message
+              , message = message
               , refs = refs
               }
   where
@@ -265,7 +272,7 @@ getLogCommits :: IO (Either String [GitCommit])
 getLogCommits =
   withCreateProcess (shell "git log --format=raw --decorate=full --all --full-history --children --encoding=utf-8"){std_out = CreatePipe} $ \_ (Just outh) _ ph -> do
     --hSetEncoding outh utf8
-    rawVersionInput <- hGetContents outh
+    rawVersionInput <- C8.hGetContents outh
     exitCode <- waitForProcess ph
     case exitCode of
       ExitFailure _ -> gitError
@@ -275,7 +282,7 @@ getLogCommits =
 -- в текущем каталоге в виде мэпа.
 getLogCommitsMap :: IO (Either String GitCommitsMap)
 getLogCommitsMap =
-  fmap (fromList . map (\x -> (hash x, x))) <$> getLogCommits
+  fmap (fromList . fmap (\x -> (hash x, x))) <$> getLogCommits
 
 hashToCommit :: GitCommitsMap -> GitHash -> Maybe GitCommit
 hashToCommit commitsMap commit = commit `lookup` commitsMap
@@ -287,7 +294,7 @@ hashToCommit' commitsMap commit =
     _ -> error $ "Commit with hash " <> show commit <> " not found"
 
 hashesToCommits :: GitCommitsMap -> [GitHash] -> [GitCommit]
-hashesToCommits = map . hashToCommit'
+hashesToCommits = fmap . hashToCommit'
 
 toCommits :: GitCommitsMap -> [GitCommit]
 toCommits = elems
