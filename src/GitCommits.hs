@@ -18,6 +18,7 @@ module GitCommits
     , hashesToCommits
     , toCommits
     , toHashes
+    , getTopCommits
     ) where
 
 import Prelude hiding (takeWhile, take, lookup, hGetContents)
@@ -34,7 +35,7 @@ import Data.Attoparsec.Combinator
 import qualified Data.ByteString.Char8 as C8
 import Data.Attoparsec.ByteString.Char8
 
-import Data.Text as T hiding (count, head)
+import Data.Text as T hiding (count, head, null, filter)
 import Data.Text.Encoding (decodeUtf8With)
 import Data.Text.Encoding.Error (lenientDecode)
 
@@ -302,3 +303,9 @@ toCommits = elems
 toHashes :: GitCommitsMap -> [GitHash]
 toHashes = keys
 
+-- | Return top heads found in repository
+getTopCommits :: GitCommitsMap -> [GitCommit]
+getTopCommits =
+  filter hasNoChilds . toCommits
+  where
+    hasNoChilds = null . childrens
