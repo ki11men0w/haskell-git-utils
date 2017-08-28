@@ -148,7 +148,7 @@ parseGitRemoteBranch = do
   return $ GitRemoteBranch repo name
 
 parseGitTag :: Parser GitReference
-parseGitTag = GitTag <$> (string "tag: " *> parseToken)
+parseGitTag = GitTag <$> (string "tag: refs/tags/" *> parseToken)
 
 parseReference :: Parser GitReference
 parseReference =
