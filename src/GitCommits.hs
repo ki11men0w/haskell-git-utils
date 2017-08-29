@@ -19,6 +19,9 @@ module GitCommits
     , toCommits
     , toHashes
     , getTopCommits
+    , getTags
+    , getBranches
+    , getRemoteBranches
     ) where
 
 import Prelude hiding (takeWhile, take, lookup, hGetContents)
@@ -309,3 +312,27 @@ getTopCommits =
   filter hasNoChilds . toCommits
   where
     hasNoChilds = null . childrens
+
+getTags :: GitCommit -> [RefName]
+getTags =
+  mapMaybe maybeGitTag . refs
+  where
+    maybeGitTag :: GitReference -> Maybe RefName
+    maybeGitTag (GitTag refName) = Just refName
+    maybeGitTag _ = Nothing
+
+getBranches :: GitCommit -> [RefName]
+getBranches =
+  mapMaybe maybeGitBranches . refs
+  where
+    maybeGitBranches :: GitReference -> Maybe RefName
+    maybeGitBranches (GitBranch refName) = Just refName
+    maybeGitBranches _ = Nothing
+
+getRemoteBranches :: GitCommit -> [(RepoName, RefName)]
+getRemoteBranches =
+  mapMaybe maybeRemoteBranch . refs
+  where
+    maybeRemoteBranch :: GitReference -> Maybe (RepoName, RefName)
+    maybeRemoteBranch (GitRemoteBranch repoName refName) = Just (repoName, refName)
+    maybeRemoteBranch _ = Nothing
