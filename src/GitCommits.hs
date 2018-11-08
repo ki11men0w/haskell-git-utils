@@ -29,7 +29,7 @@ module GitCommits
 import Prelude hiding (takeWhile, take, lookup, hGetContents)
 import System.Process
 import Control.Monad (void)
-import Data.Maybe (mapMaybe, maybe)
+import Data.Maybe (mapMaybe, maybe, listToMaybe)
 import Data.Monoid ((<>))
 import Data.List (intercalate, sortOn)
 import System.Exit (ExitCode(..))
@@ -63,6 +63,7 @@ type GitHash = Textual
 type UserName = Textual
 type UserEmail = Textual
 type MessageText = Textual
+type GpgSignature = Textual
 
 
 data GitReference = GitRef Textual (Maybe GitReference) | GitTag RefName | GitBranch RefName | GitRemoteBranch RepoName RefName
@@ -78,6 +79,7 @@ data GitCommit = GitCommit {
   , parents :: [GitHash]
   , author :: OwnershipInfo
   , committer :: OwnershipInfo
+  , gpgsig :: Maybe GpgSignature
   , message :: Maybe MessageText
   , refs :: [GitReference]
   } deriving (Show)
@@ -89,6 +91,7 @@ data LogField = LogFieldParent GitHash
               | LogFieldTree GitHash
               | LogFieldAuthor OwnershipInfo
               | LogFieldCommitter OwnershipInfo
+              | LogFieldGpgSignature GpgSignature
               | LogFieldUnused
                 deriving (Show)
 
@@ -207,9 +210,16 @@ parseCommitter = do
   string "committer "
   LogFieldCommitter <$> parseOwnershipInfo
 
+parseGpgSig :: Parser LogField
+parseGpgSig = do
+  LogFieldGpgSignature <$> (string "gpgsig" *> (decode . C8.intercalate "\n" <$> oneLine `sepBy` endOfLine) <* endOfLine)
+  where
+    padding = string " " *> return ()
+    oneLine = C8.pack <$> (padding *> manyTill anyChar (lookAhead endOfLine))
+
 parseLogFields :: Parser [LogField]
 parseLogFields =
-  many $ choice [parseParent, parseAuthor, parseCommitter, parseTree]
+  many $ choice [parseParent, parseAuthor, parseCommitter, parseTree, parseGpgSig]
 
 
 commitStart :: Parser ()
@@ -241,6 +251,7 @@ parseCommit remoteRepos = do
               , parents = getParents logFields
               , author = getAuthor logFields
               , committer = getCommitter logFields
+              , gpgsig = getGpgSignature logFields
               , message = message
               , refs = refs
               }
@@ -276,6 +287,14 @@ parseCommit remoteRepos = do
         getCommitter' :: LogField -> Maybe OwnershipInfo
         getCommitter' (LogFieldCommitter x) = Just x
         getCommitter' _ = Nothing
+
+    getGpgSignature :: [LogField] -> Maybe GpgSignature
+    getGpgSignature =
+      listToMaybe . mapMaybe getGpgSignature'
+      where
+        getGpgSignature' :: LogField -> Maybe GpgSignature
+        getGpgSignature' (LogFieldGpgSignature x) = Just x
+        getGpgSignature' _ = Nothing
 
 
 -- | Возвращает все комиты репозитория расположенного
