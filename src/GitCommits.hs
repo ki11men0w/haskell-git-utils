@@ -9,6 +9,7 @@ module GitCommits
     , GitCommit(..)
     , GitVersion(..)
     , GitCommitsMap
+    , RemoteRepo(..)
     , gitError
     , getGitVersion
     , getLogCommits
@@ -22,6 +23,7 @@ module GitCommits
     , getTags
     , getBranches
     , getRemoteBranches
+    , getRemoteRepos
     ) where
 
 import Prelude hiding (takeWhile, take, lookup, hGetContents)
@@ -29,7 +31,7 @@ import System.Process
 import Control.Monad (void)
 import Data.Maybe (mapMaybe, maybe)
 import Data.Monoid ((<>))
-import Data.List (intercalate)
+import Data.List (intercalate, sortOn)
 import System.Exit (ExitCode(..))
 import Data.Map (Map(..), fromList, elems, keys, lookup)
 import Control.Applicative (many, (<|>))
@@ -90,6 +92,9 @@ data LogField = LogFieldParent GitHash
               | LogFieldUnused
                 deriving (Show)
 
+data RemoteRepo = RemoteRepo {
+      getRemoteRepoName :: RepoName
+    } deriving (Show)
 
 gitError = error "Error running git process"
 
@@ -126,15 +131,15 @@ parseToken = decode <$> takeWhile1 (\c -> notInClass "),\n\r" c && (not . isSpac
 parseGitCommitHash :: Parser GitHash
 parseGitCommitHash = pack <$> count 40 (satisfy (inClass "0-9a-f"))
 
-parseCommitLog :: Parser [GitCommit]
-parseCommitLog =
-  (parseCommit `sepBy1` endOfLine) <* endOfInput
+parseCommitLog :: [RemoteRepo] -> Parser [GitCommit]
+parseCommitLog remoteRepos =
+  ((parseCommit remoteRepos) `sepBy1` endOfLine) <* endOfInput
 
 
-parseGitRef :: Parser GitReference
-parseGitRef = do
+parseGitRef :: [RemoteRepo] -> Parser GitReference
+parseGitRef remoteRepos = do
   name <- parseToken
-  ref <- option Nothing $ lookAhead $ string " -> " *> (Just <$> parseReference)
+  ref <- option Nothing $ lookAhead $ string " -> " *> (Just <$> parseReference remoteRepos)
   return $ GitRef name ref
 
 parseGitBranch :: Parser GitReference
@@ -143,25 +148,28 @@ parseGitBranch = do
   name <- parseToken
   return $ GitBranch name
 
-parseGitRemoteBranch :: Parser GitReference
-parseGitRemoteBranch = do
+parseGitRemoteBranch :: [RemoteRepo] -> Parser GitReference
+parseGitRemoteBranch remoteRepos = do
   string "refs/remotes/"
-  repo <- pack <$> many1 (notChar '/')
-  char '/'
+  repo <- choice $ findStringFollowedBySlash . getRemoteRepoName <$> remoteRepos
   name <- parseToken
   return $ GitRemoteBranch repo name
+  where
+    findStringFollowedBySlash :: RepoName -> Parser RepoName
+    findStringFollowedBySlash repoName =
+       (pack . C8.unpack) <$> try (string ((C8.pack . unpack) repoName) <* char '/')
 
 parseGitTag :: Parser GitReference
 parseGitTag = GitTag <$> (string "tag: refs/tags/" *> parseToken)
 
-parseReference :: Parser GitReference
-parseReference =
-  parseGitBranch <|> parseGitRemoteBranch <|> parseGitTag <|> parseGitRef
+parseReference :: [RemoteRepo] -> Parser GitReference
+parseReference remoteRepos =
+  parseGitBranch <|> (parseGitRemoteBranch remoteRepos) <|> parseGitTag <|> (parseGitRef remoteRepos)
 
-parseReferences :: Parser [GitReference]
-parseReferences = do
+parseReferences :: [RemoteRepo] -> Parser [GitReference]
+parseReferences remoteRepos = do
   char '('
-  result <- parseReference `sepBy1` (string ", " <|> string " -> ")
+  result <- (parseReference remoteRepos) `sepBy1` (string ", " <|> string " -> ")
   char ')'
   return result
 
@@ -217,12 +225,12 @@ parseMessage =
     oneLine :: Parser InputData
     oneLine = padding *> (C8.pack <$> manyTill anyChar (lookAhead anyMessageEndsWithIt))
 
-parseCommit :: Parser GitCommit
-parseCommit = do
+parseCommit :: [RemoteRepo] -> Parser GitCommit
+parseCommit remoteRepos = do
   commitStart
   hash <- parseGitCommitHash
   childrens <- option [] $ char ' ' *> (parseGitCommitHash `sepBy1` char ' ')
-  refs <- option [] (char ' ' *> parseReferences)
+  refs <- option [] (char ' ' *> (parseReferences remoteRepos))
   endOfLine
   logFields <- parseLogFields
   message <- parseMessage
@@ -273,14 +281,15 @@ parseCommit = do
 -- | Возвращает все комиты репозитория расположенного
 -- в текущем каталоге в виде списка.
 getLogCommits :: IO (Either String [GitCommit])
-getLogCommits =
+getLogCommits = do
+  remoteRepos <- Prelude.reverse . sortOn (T.length . getRemoteRepoName)  <$> getRemoteRepos'
   withCreateProcess (shell "git log --format=raw --decorate=full --all --full-history --children --encoding=utf-8"){std_out = CreatePipe} $ \_ (Just outh) _ ph -> do
     --hSetEncoding outh utf8
     rawVersionInput <- C8.hGetContents outh
     exitCode <- waitForProcess ph
     case exitCode of
       ExitFailure _ -> gitError
-      ExitSuccess -> return $ correctParseResult "Can not parse GIT log" $ parseOnly parseCommitLog rawVersionInput
+      ExitSuccess -> return $ correctParseResult "Can not parse GIT log" $ parseOnly (parseCommitLog remoteRepos) rawVersionInput
 
 -- | Возвращает все комиты репозитория расположенного
 -- в текущем каталоге в виде мэпа.
@@ -336,3 +345,31 @@ getRemoteBranches =
     maybeRemoteBranch :: GitReference -> Maybe (RepoName, RefName)
     maybeRemoteBranch (GitRemoteBranch repoName refName) = Just (repoName, refName)
     maybeRemoteBranch _ = Nothing
+
+
+-- | Возвращает все подключённые удалённые репозитории
+getRemoteRepos :: IO (Either String [RemoteRepo])
+getRemoteRepos =
+  withCreateProcess (shell "git remote"){std_out = CreatePipe} $ \_ (Just outh) _ ph -> do
+    --hSetEncoding outh utf8
+    rawVersionInput <- C8.hGetContents outh
+    exitCode <- waitForProcess ph
+    case exitCode of
+      ExitFailure _ -> gitError
+      ExitSuccess -> return $ correctParseResult "Can not parse GIT remotes" $ parseOnly parseRemoteRepos rawVersionInput
+
+getRemoteRepos' :: IO [RemoteRepo]
+getRemoteRepos' = do
+  remoteRepos <- getRemoteRepos
+  return $ case remoteRepos of
+             Left e -> error e
+             Right s -> s
+
+parseRemoteRepos :: Parser [RemoteRepo]
+parseRemoteRepos =
+  --return $ Prelude.map RemoteRepo ["origin", "import/pcct_cms_adapter"]
+  (parseRemoteRepo `sepBy1` endOfLine) -- <* endOfInput
+
+parseRemoteRepo :: Parser RemoteRepo
+parseRemoteRepo =
+ RemoteRepo . pack <$> manyTill anyChar (lookAhead endOfLine)
